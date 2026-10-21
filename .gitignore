@@ -1,0 +1,30 @@
+# Build Artifacts
+Debug/
+Release/
+*.elf
+*.bin
+*.hex
+*.map
+*.o
+*.d
+*.su
+*.launch
+
+# IDE metadata
+.settings/
+.project
+.cproject
+.mxproject
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+env/
+
+# OS specific
+Thumbs.db
+.DS_Store
+*.swp
+*~
