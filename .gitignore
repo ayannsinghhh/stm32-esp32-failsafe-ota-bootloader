@@ -10,10 +10,8 @@ Release/
 *.su
 *.launch
 
-# IDE metadata
+# IDE temporary metadata
 .settings/
-.project
-.cproject
 .mxproject
 
 # Python
