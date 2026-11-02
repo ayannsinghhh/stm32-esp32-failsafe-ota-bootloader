@@ -21,7 +21,7 @@ The system features an automated **anti-bricking hardware rollback mechanism** u
 |   |  wifi_ota_sender.py (Python Host Utility)                                 |   |
 |   |  * Encrypts payload (AES-256-CBC)                                         |   |
 |   |  * Generates 40-byte header: [Size(4B) | CRC32(4B) | SHA-256(32B)]        |   |
-|   |  * Streams 256-byte chunks with ACK/NACK flow control                     |   |
+|   |  * Streams 256-byte chunks with synchronous ACK/NACK flow control         |   |
 |   +---------------------------------------------------------------------------+   |
 +------------------------------------------|----------------------------------------+
                                            | TCP Socket (Port 8080)
@@ -29,9 +29,9 @@ The system features an automated **anti-bricking hardware rollback mechanism** u
 +-----------------------------------------------------------------------------------+
 |                         WIRELESS GATEWAY (ESP32 Node)                             |
 |   +---------------------------------------------------------------------------+   |
-|   |  esp32_wifi_bridge.ino                                                    |   |
-|   |  * Hosts SoftAP / Connects to WLAN                                        |   |
-|   |  * Bi-directional non-blocking TCP socket <---> UART2 bridge              |   |
+|   |  esp32_wifi_bridge.ino / PlatformIO firmware                              |   |
+|   |  * Connects to WLAN / Hosts TCP Server on Port 8080                       |   |
+|   |  * Bi-directional non-blocking TCP socket <---> UART2 bridge (115200 8N1) |   |
 |   +---------------------------------------------------------------------------+   |
 +------------------------------------------|----------------------------------------+
                                            | Full-Duplex UART (115200 Baud)
@@ -40,10 +40,8 @@ The system features an automated **anti-bricking hardware rollback mechanism** u
 |                     TARGET EMBEDDED SYSTEM (STM32F446RE)                          |
 |   +---------------------------------------------------------------------------+   |
 |   |  BARE-METAL BOOTLOADER (0x08000000)                                       |   |
-|   |  * Interactive Boot Menu (3s timeout fallback)                            |   |
 |   |  * Evaluates RTC->BKP0R & RCC_CSR_IWDGRSTF reset flags                    |   |
 |   |  * Automatic Rollback to Golden Image if candidate hangs                  |   |
-|   |  * Flash driver: Sector erase & chunk programming                         |   |
 |   |  * De-initializes peripherals, masks NVIC, relocates SCB->VTOR & sets MSP |   |
 |   +---------------------------------------------------------------------------+   |
 |                        |                                 |                        |
@@ -51,7 +49,9 @@ The system features an automated **anti-bricking hardware rollback mechanism** u
 |       +---------------------------------+  +----------------------------------+   |
 |       |  SLOT 0: GOLDEN / FACTORY IMAGE |  |  SLOT 1: CANDIDATE UPDATE IMAGE  |   |
 |       |  (Address: 0x08020000)          |  |  (Address: 0x08040000)           |   |
-|       |  * Known-good failsafe firmware |  |  * New deployment under trial    |   |
+|       |  * Known-good recovery firmware |  |  * New deployment under trial    |   |
+|       |  * Active OTA Flash & Decryption|  |  * Distinct Double-Blink PA5 LED |   |
+|       |  * Arms RTC->BKP0R & Reboots    |  |  * Watchdog probation check      |   |
 |       +---------------------------------+  +----------------------------------+   |
 +-----------------------------------------------------------------------------------+
 ```
@@ -74,8 +74,8 @@ The system features an automated **anti-bricking hardware rollback mechanism** u
 ### 1. Zero-Brick Automated Rollback Mechanism
 * Newly deployed firmware in **Slot 1** is executed on probationary status.
 * The bootloader activates the **Independent Watchdog (`IWDG`)** with a 3-second timeout window prior to jumping to the candidate image.
-* **Health Check & Confirmation:** The application must successfully complete startup self-tests and feed/refresh the watchdog.
-* **Failure Interception:** If the candidate application hard-faults, hangs, or fails to service the watchdog, the hardware reset triggers. Upon reboot, the bootloader reads `RCC->CSR & RCC_CSR_IWDGRSTF`, clears the flag, atomically updates `RTC->BKP0R = 0`, and immediately falls back to the **Slot 0 Golden Image**.
+* **Health Check & Confirmation:** The candidate application must successfully complete startup self-tests and feed/refresh the watchdog (`IWDG_KR = 0xAAAA`).
+* **Failure Interception:** If the candidate application hard-faults, hangs, or fails to service the watchdog, a hardware reset triggers. Upon reboot, the bootloader reads `RCC->CSR & RCC_CSR_IWDGRSTF`, clears the flag, atomically updates `RTC->BKP0R = 0`, and immediately falls back to the **Slot 0 Golden Image**.
 
 ### 2. Clean Execution Handover (Bare-Metal Context Switch)
 To guarantee glitch-free execution transfer from bootloader to application:
@@ -92,7 +92,7 @@ To guarantee glitch-free execution transfer from bootloader to application:
 
 ### 3. Multi-Stage Cryptographic & Integrity Verification
 * **AES-256-CBC Encryption:** Protects proprietary firmware binaries in transit over wireless networks.
-* **CRC-32 Checksum:** Validates frame transmission and on-chip Flash integrity.
+* **CRC-32 Checksum:** Validates frame transmission and on-chip Flash integrity (IEEE 802.3 standard).
 * **SHA-256 Digest:** 32-byte pre-boot cryptographic validation comparing calculated payload digest against deployment header.
 * **Chunked Handshaking:** Synchronous 256-byte chunk transfer with `READY`, `HDR_OK`, and `ACK`/`NACK` packet flow control.
 
@@ -100,11 +100,15 @@ To guarantee glitch-free execution transfer from bootloader to application:
 
 ## 🔌 Hardware Pinout & Wiring
 
-| ESP32 Pin | STM32 Nucleo Pin | Signal Name | Notes |
+| ESP32 DevKit Pin | STM32 Nucleo Pin | Signal Name | Description |
 | :---: | :---: | :---: | :--- |
-| **GPIO 17 (TX2)** | **PA3 (RX / D0)** | UART Data (ESP32 -> STM32) | Downstream firmware chunks |
-| **GPIO 16 (RX2)** | **PA2 (TX / D1)** | UART Data (STM32 -> ESP32) | Status logs, ACK, Ready signals |
-| **GND** | **GND** | Common Ground | Required for clean signal reference |
+| **GPIO 26 (RX2)** | **D8 (PA9 / USART1_TX)** | UART Data (STM32 -> ESP32) | Status logs, ACK, Ready signals |
+| **GPIO 25 (TX2)** | **D2 (PA10 / USART1_RX)**| UART Data (ESP32 -> STM32) | Downstream encrypted firmware chunks |
+| **GND** | **GND** (CN5 pin 4) | Common Ground | Required for clean signal reference |
+
+> [!IMPORTANT]
+> **Nucleo Solder Bridge Note:** On factory NUCLEO-F446RE boards, Arduino headers `D0` (PA3) and `D1` (PA2) have solder bridges `SB62` and `SB63` **OPEN** by default, routing `USART2` strictly to the onboard ST-LINK USB VCP (`COM9`). 
+> Wiring the ESP32 to **`D8` (PA9)** and **`D2` (PA10)** connects directly to **`USART1`**, enabling dual-UART operation with zero soldering required!
 
 ---
 
@@ -112,36 +116,58 @@ To guarantee glitch-free execution transfer from bootloader to application:
 
 ### Prerequisites
 * **STM32CubeIDE** (v1.14+ or equivalent GNU Arm Embedded Toolchain)
-* **Arduino IDE** (with ESP32 board support package installed)
+* **STM32CubeProgrammer**
+* **PlatformIO** or **Arduino IDE** (with ESP32 board support package)
 * **Python 3.9+** with required libraries:
   ```bash
   pip install -r host_tools/requirements.txt
   ```
 
-### Build & Deployment Steps
+---
 
-1. **Flash STM32 Bootloader:**
-   * Open `bootloader/` in STM32CubeIDE.
-   * Build project (`Release` or `Debug`).
-   * Flash via ST-LINK to `0x08000000`.
+### Step-by-Step Deployment
 
-2. **Flash Slot 0 (Golden Image):**
-   * Open `user_application/` in STM32CubeIDE.
-   * Ensure linker script `STM32F446RETX_FLASH.ld` points to `ORIGIN = 0x08020000`.
-   * Flash to `0x08020000` via ST-LINK.
+#### 1. Flash the STM32 Bootloader
+* Open `bootloader/` in STM32CubeIDE.
+* Build project (`Ctrl + B`).
+* Flash `bootloader.bin` via ST-LINK to address **`0x08000000`**.
 
-3. **Deploy ESP32 Wi-Fi Gateway:**
-   * Open `esp32_gateway/esp32_wifi_bridge.ino` in Arduino IDE.
-   * Select your ESP32 board and upload.
-   * The ESP32 will broadcast the Wi-Fi AP: `STM32_OTA_SERVER` (Password: `password123`).
+#### 2. Flash Slot 0 (Golden Image)
+* Open `user_application/` in STM32CubeIDE.
+* Ensure linker script `STM32F446RETX_FLASH.ld` points to:
+  ```ld
+  FLASH (rx) : ORIGIN = 0x08020000, LENGTH = 128K
+  ```
+* Build project and flash `f446_userapplication.bin` to address **`0x08020000`**.
 
-4. **Perform Wireless OTA Update:**
-   * Connect workstation Wi-Fi to `STM32_OTA_SERVER`.
-   * Generate updated binary for Slot 1 (`ORIGIN = 0x08040000`).
-   * Run deployment client:
-     ```bash
-     python host_tools/wifi_ota_sender.py
-     ```
+#### 3. Upload ESP32 Gateway Firmware
+* In PlatformIO: Run `pio run -t upload` inside `esp32_gateway/`.
+* Or in Arduino IDE: Open `esp32_gateway/esp32_wifi_bridge.ino`, configure Wi-Fi credentials, and upload.
+* Note the IP address printed on the serial console (e.g., `10.156.71.129`).
+
+#### 4. Verify Bi-Directional Wireless Link
+Run the diagnostic script to ensure full end-to-end handshake:
+```bash
+python host_tools/verify_wifi_transfer.py
+```
+
+#### 5. Generate Candidate Binary & Deploy Over-The-Air
+1. In `user_application/Core/Src/main.c`, use the candidate code from `user_application/candidate_slot1/main.c`.
+2. In `user_application/STM32F446RETX_FLASH.ld`, update Flash origin to Slot 1:
+   ```ld
+   FLASH (rx) : ORIGIN = 0x08040000, LENGTH = 256K
+   ```
+3. Press `Ctrl + B` in STM32CubeIDE to compile the candidate binary (*do not flash via ST-LINK!*).
+4. Run the wireless OTA deployment client:
+   ```bash
+   python host_tools/wifi_ota_sender.py
+   ```
+5. Watch the real-time progress:
+   - Chunk-by-chunk encrypted transfer over Wi-Fi
+   - STM32 on-chip decryption & Flash sector programming
+   - CRC-32 & SHA-256 verification
+   - Automatic handoff: Bootloader verifies and jumps to Slot 1 (`0x08040000`)
+   - Distinct double-blink LED confirms active Slot 1 execution!
 
 ---
 
@@ -149,19 +175,26 @@ To guarantee glitch-free execution transfer from bootloader to application:
 
 ```
 .
-├── bootloader/             # STM32F446RE IAP Bootloader firmware (C/Assembly)
-│   ├── Core/               # HAL initialization, UART driver, jump routines
-│   └── STM32F446RETX_FLASH.ld # Bootloader linker script (0x08000000)
-├── user_application/       # User application firmware (Golden & Candidate slots)
-│   ├── Core/               # Application logic, watchdog service, VTOR setup
-│   └── STM32F446RETX_FLASH.ld # Application linker script (0x08020000 / 0x08040000)
-├── esp32_gateway/          # ESP32 Wi-Fi TCP-to-UART bridge firmware (.ino)
-├── host_tools/             # Python OTA deployment tools (Wi-Fi & Serial)
-│   ├── wifi_ota_sender.py  # TCP socket chunk sender with AES & SHA-256
-│   ├── ota_sender.py       # Direct serial/UART fallback uploader
-│   └── requirements.txt    # Python dependencies
-├── .gitignore              # Build and IDE ignore rules
-└── README.md               # Complete architecture & documentation
+├── bootloader/                 # STM32F446RE IAP Bootloader firmware (C/Assembly)
+│   ├── Core/                   # HAL initialization, UART driver, jump routines
+│   ├── Drivers/                # CMSIS & STM32F4xx HAL Driver libraries
+│   └── STM32F446RETX_FLASH.ld  # Bootloader linker script (0x08000000)
+├── user_application/           # User application firmware (Golden & Candidate slots)
+│   ├── Core/                   # Dual-UART, AES-256 decryption, SHA-256 digest, Flash write
+│   ├── Drivers/                # CMSIS & STM32F4xx HAL Driver libraries
+│   ├── candidate_slot1/        # Reference candidate image source (Slot 1 double-blink app)
+│   └── STM32F446RETX_FLASH.ld  # Application linker script (0x08020000 / 0x08040000)
+├── esp32_gateway/              # ESP32 Wi-Fi TCP-to-UART bridge
+│   ├── esp32_wifi_bridge.ino   # Arduino IDE sketch (Pins 25/26, 115200 baud)
+│   ├── platformio.ini          # PlatformIO project configuration
+│   └── src/                    # PlatformIO source code
+├── host_tools/                 # Python OTA deployment tools (Wi-Fi & Serial)
+│   ├── wifi_ota_sender.py      # TCP socket chunk sender with AES-256 & SHA-256
+│   ├── verify_wifi_transfer.py # Bi-directional hardware handshake test utility
+│   ├── ota_sender.py           # Direct serial/UART fallback uploader
+│   └── requirements.txt        # Python dependencies
+├── .gitignore                  # Build and IDE ignore rules
+└── README.md                   # Complete architecture & documentation
 ```
 
 ---

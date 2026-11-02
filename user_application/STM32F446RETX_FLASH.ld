@@ -45,7 +45,12 @@ _Min_Stack_Size = 0x400; /* required amount of stack */
 MEMORY
 {
   RAM    (xrw)    : ORIGIN = 0x20000000,   LENGTH = 128K
-  FLASH    (rx)    : ORIGIN = 0x08040000,   LENGTH = 128K
+  /* --- MEMORY CONFIGURATION FOR DUAL-SLOT OTA --- */
+  /* [Active] Slot 0 (Golden Image, 128KB): */
+  FLASH    (rx)    : ORIGIN = 0x08020000,   LENGTH = 128K
+  /* [Candidate] Slot 1 (Candidate Image, 256KB): Uncomment for candidate build
+  FLASH    (rx)    : ORIGIN = 0x08040000,   LENGTH = 256K
+  */
 }
 
 /* Sections */
@@ -186,3 +191,5 @@ SECTIONS
 
   .ARM.attributes 0 : { *(.ARM.attributes) }
 }
+
+
